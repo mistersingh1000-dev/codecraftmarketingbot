@@ -23,6 +23,7 @@ const PHONE_NUMBER = "+91 70097 32517";
 
 const bot = new Telegraf(BOT_TOKEN);
 const userSessions = new Map();
+const pendingOrders = new Map();
 
 let productsCache = [];
 let cacheTimestamp = 0;
@@ -94,6 +95,54 @@ async function sendFeedbackToAdmin(userId, userName, feedback, productInterest) 
   }
 }
 
+async function sendOrderNotificationToAdmin(orderId, product, customer, userId) {
+  try {
+    const adminId = ADMIN_IDS[0];
+    if (!adminId) return;
+
+    const message = `🎯 <b>NEW ORDER READY FOR APPROVAL!</b>\n\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `📦 <b>ORDER DETAILS</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `🎫 <b>Order ID:</b> <code>${orderId}</code>\n` +
+      `👤 <b>Customer:</b> ${customer}\n` +
+      `📱 <b>Customer ID:</b> ${userId}\n\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `💾 <b>PRODUCT INFO</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `📛 <b>Product ID:</b> ${product.ProductID}\n` +
+      `📝 <b>Product Name:</b> ${product.ProductName}\n` +
+      `📄 <b>Description:</b> ${product.Description}\n\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `💰 <b>PRICING</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `Original Price: ₹${product.OriginalPrice}\n` +
+      `Quoted Price: ₹${product.YourPrice}\n` +
+      `⚠️ <b>NOTE:</b> Price is tentative. Change if needed.\n\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<b>✅ APPROVE or ❌ REJECT?</b>`;
+
+    const buttons = Markup.inlineKeyboard([
+      [
+        { text: '✅ APPROVE ORDER', callback_data: `approve_${orderId}_${userId}` },
+        { text: '❌ REJECT ORDER', callback_data: `reject_${orderId}_${userId}` }
+      ]
+    ]);
+
+    await bot.telegram.sendMessage(adminId, message, { parse_mode: 'HTML', ...buttons });
+  } catch (err) {
+    console.error('Error sending admin notification:', err.message);
+  }
+}
+
+function searchProducts(query, products) {
+  const lowerQuery = query.toLowerCase();
+  return products.filter(p => 
+    (p.ProductName && p.ProductName.toLowerCase().includes(lowerQuery)) ||
+    (p.Description && p.Description.toLowerCase().includes(lowerQuery))
+  );
+}
+
 bot.command('start', async (ctx) => {
   const userId = ctx.from.id;
   const userName = ctx.from.first_name || 'Friend';
@@ -111,14 +160,18 @@ bot.command('start', async (ctx) => {
     `✅ WordPress Themes\n` +
     `✅ Android Apps\n\n` +
     `🚀 <b>How It Works:</b>\n` +
-    `1️⃣ Browse Products\n` +
+    `1️⃣ Browse or Search Products\n` +
     `2️⃣ Choose What You Need\n` +
-    `3️⃣ Make Payment (UPI/Crypto)\n` +
-    `4️⃣ Get Instant Access\n\n` +
+    `3️⃣ Ready to Checkout\n` +
+    `4️⃣ Admin Reviews & Approves\n` +
+    `5️⃣ Make Payment & Get Instant Access\n\n` +
+    `⚠️ <b>NOTE:</b> Pricing shown is tentative.\n` +
+    `Final price will be confirmed before order finalization.\n\n` +
     `Ready to explore?`;
 
   const buttons = Markup.inlineKeyboard([
     [{ text: '🛍 Browse Products', callback_data: 'browse' }],
+    [{ text: '🔍 Search Product', callback_data: 'search' }],
     [{ text: '❓ Need Something Specific?', callback_data: 'request' }],
     [{ text: '📞 Contact Us', callback_data: 'contact' }],
   ]);
@@ -153,6 +206,26 @@ bot.on('callback_query', async (ctx) => {
       .catch(() => ctx.reply(text, { parse_mode: 'HTML', ...Markup.inlineKeyboard(buttons) }));
   }
 
+  if (data === 'search') {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    const session = userSessions.get(userId) || {};
+    session.stage = 'awaiting_search';
+    userSessions.set(userId, session);
+
+    const text = `🔍 <b>SEARCH PRODUCT</b>\n\n` +
+      `What product are you looking for?\n\n` +
+      `Examples:\n` +
+      `• Adobe\n` +
+      `• Office\n` +
+      `• WordPress\n` +
+      `• Android\n\n` +
+      `📝 Type your search query:`;
+
+    await ctx.editMessageText(text, { parse_mode: 'HTML' })
+      .catch(() => ctx.reply(text, { parse_mode: 'HTML' }));
+  }
+
   if (data.startsWith('product_')) {
     await ctx.answerCbQuery();
     const productId = data.replace('product_', '');
@@ -166,10 +239,12 @@ bot.on('callback_query', async (ctx) => {
       `💰 <b>Pricing:</b>\n` +
       `Original: <s>₹${product.OriginalPrice}</s>\n` +
       `<b>Our Price: ₹${product.YourPrice}</b>\n\n` +
-      `Ready to buy?`;
+      `⚠️ <b>NOTE:</b> This price is tentative.\n` +
+      `Final price will be confirmed after admin review.\n\n` +
+      `Ready to proceed?`;
 
     const buttons = Markup.inlineKeyboard([
-      [{ text: '✅ Yes, Buy Now!', callback_data: `buy_${productId}` }],
+      [{ text: '✅ Yes, Proceed to Checkout!', callback_data: `checkout_${productId}` }],
       [{ text: '❌ Show More Products', callback_data: 'browse' }],
     ]);
 
@@ -177,42 +252,172 @@ bot.on('callback_query', async (ctx) => {
       .catch(() => ctx.reply(text, { parse_mode: 'HTML', ...buttons }));
   }
 
-  if (data.startsWith('buy_')) {
+  if (data.startsWith('checkout_')) {
     await ctx.answerCbQuery();
-    const productId = data.replace('buy_', '');
+    const productId = data.replace('checkout_', '');
     const products = await getProducts();
     const product = products.find(p => p.ProductID === productId);
+    const userId = ctx.from.id;
+    const userName = ctx.from.first_name || 'User';
 
     if (!product) return ctx.reply('❌ Product not found');
 
     const orderId = `ORD-${Date.now()}`;
 
-    const text = `✅ <b>ORDER CONFIRMED!</b>\n\n` +
+    pendingOrders.set(orderId, {
+      productId: product.ProductID,
+      product: product,
+      customerId: userId,
+      customerName: userName,
+      createdAt: new Date(),
+      status: 'pending_approval'
+    });
+
+    await sendOrderNotificationToAdmin(orderId, product, userName, userId);
+
+    const text = `⏳ <b>ORDER SUBMITTED FOR APPROVAL!</b>\n\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `🎫 <b>ORDER ID:</b> <code>${orderId}</code>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
       `📦 <b>Product:</b> ${product.ProductName}\n` +
       `💰 <b>Amount:</b> ₹${product.YourPrice}\n` +
-      `🎫 <b>Order ID:</b> <code>${orderId}</code>\n\n` +
-      `━━━━━━━━━━━━━━━━━━━━\n` +
-      `💳 <b>PAYMENT</b>\n` +
-      `━━━━━━━━━━━━━━━━━━━━\n\n` +
-      `📱 <b>UPI:</b> <code>${UPI_ID}</code>\n\n` +
-      `💰 <b>Binance ID:</b> <code>${BINANCE_ID}</code>\n\n` +
-      `━━━━━━━━━━━━━━━━━━━━\n` +
-      `📸 <b>After Payment:</b>\n` +
-      `1. Take screenshot\n` +
-      `2. Send to WhatsApp\n` +
-      `3. We'll deliver in 4-6 hours\n\n` +
-      `👥 WhatsApp: ${WHATSAPP_CONTACT}\n` +
-      `💬 Telegram: ${TELEGRAM_CONTACT}\n` +
-      `☎️ Phone: ${PHONE_NUMBER}\n\n` +
-      `🎁 <b>Join our community for updates!</b>`;
+      `⏱️ <b>Status:</b> Awaiting Admin Approval\n\n` +
+      `⏳ <b>What happens next:</b>\n` +
+      `1. Admin reviews your order\n` +
+      `2. Admin checks product availability\n` +
+      `3. Admin confirms final pricing\n` +
+      `4. You receive approval notification\n` +
+      `5. You complete payment\n` +
+      `6. Instant delivery! 🎁\n\n` +
+      `📱 <b>Check your notifications!</b>\n` +
+      `Admin will contact you shortly...\n\n` +
+      `⚠️ <b>IMPORTANT:</b>\n` +
+      `Final price may differ from quoted price.\n` +
+      `You'll be informed if there's any change.`;
 
     const buttons = Markup.inlineKeyboard([
-      [{ text: '👥 Join WhatsApp', url: WHATSAPP_GROUP }],
-      [{ text: '🌐 Join Telegram', url: TELEGRAM_CHANNEL }],
-      [{ text: '📱 Send Screenshot', url: WHATSAPP_CONTACT }],
+      [{ text: '👥 Join WhatsApp Group', url: WHATSAPP_GROUP }],
+      [{ text: '🌐 Join Telegram Channel', url: TELEGRAM_CHANNEL }],
+      [{ text: '📞 Contact Admin', url: TELEGRAM_CONTACT }],
+      [{ text: '🛍 Browse More', callback_data: 'browse' }],
     ]);
 
     await ctx.reply(text, { parse_mode: 'HTML', ...buttons });
+  }
+
+  if (data.startsWith('approve_')) {
+    await ctx.answerCbQuery('Approving order...');
+    const parts = data.replace('approve_', '').split('_');
+    const orderId = parts[0];
+    const customerId = parseInt(parts[1]);
+
+    const order = pendingOrders.get(orderId);
+    if (!order) {
+      return ctx.answerCbQuery('Order not found', { show_alert: true });
+    }
+
+    order.status = 'approved';
+    order.approvedAt = new Date();
+    pendingOrders.set(orderId, order);
+
+    const customerText = `✅ <b>ORDER APPROVED! 🎉</b>\n\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `🎫 <b>ORDER ID:</b> <code>${orderId}</code>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `📦 <b>Product:</b> ${order.product.ProductName}\n` +
+      `💰 <b>Final Amount:</b> ₹${order.product.YourPrice}\n` +
+      `✅ <b>Status:</b> Approved & Ready for Payment\n\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `💳 <b>PAYMENT INSTRUCTIONS</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `📱 <b>UPI Payment:</b>\n` +
+      `<code>${UPI_ID}</code>\n` +
+      `(Copy and paste in your UPI app)\n\n` +
+      `💰 <b>Crypto Payment (Binance):</b>\n` +
+      `ID: <code>${BINANCE_ID}</code>\n\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `📸 <b>AFTER PAYMENT:</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `✅ Take screenshot of payment\n` +
+      `✅ Send to WhatsApp\n` +
+      `✅ We'll deliver in 4-6 hours\n\n` +
+      `👥 WhatsApp: ${WHATSAPP_CONTACT}\n` +
+      `💬 Telegram: ${TELEGRAM_CONTACT}\n` +
+      `☎️ Phone: ${PHONE_NUMBER}\n\n` +
+      `⏱️ <b>Delivery Time:</b>\n` +
+      `Standard: 4-6 hours\n` +
+      `Some orders: 24-48 hours\n\n` +
+      `🎁 <b>Join our community for updates!</b>`;
+
+    const customerButtons = Markup.inlineKeyboard([
+      [{ text: '📱 Send Payment Screenshot', url: WHATSAPP_CONTACT }],
+      [{ text: '👥 Join Community', url: WHATSAPP_GROUP }],
+    ]);
+
+    try {
+      await bot.telegram.sendMessage(customerId, customerText, { parse_mode: 'HTML', ...customerButtons });
+    } catch (err) {
+      console.error('Error sending customer message:', err.message);
+    }
+
+    const adminText = `✅ <b>ORDER APPROVED!</b>\n\n` +
+      `Order ID: <code>${orderId}</code>\n` +
+      `Customer: ${order.customerName}\n` +
+      `Product: ${order.product.ProductName}\n` +
+      `Amount: ₹${order.product.YourPrice}\n\n` +
+      `✅ Awaiting customer payment...`;
+
+    await ctx.editMessageText(adminText, { parse_mode: 'HTML' })
+      .catch(() => {});
+  }
+
+  if (data.startsWith('reject_')) {
+    await ctx.answerCbQuery('Rejecting order...');
+    const parts = data.replace('reject_', '').split('_');
+    const orderId = parts[0];
+    const customerId = parseInt(parts[1]);
+
+    const order = pendingOrders.get(orderId);
+    if (!order) {
+      return ctx.answerCbQuery('Order not found', { show_alert: true });
+    }
+
+    order.status = 'rejected';
+    order.rejectedAt = new Date();
+    pendingOrders.set(orderId, order);
+
+    const customerText = `❌ <b>ORDER COULD NOT BE PROCESSED</b>\n\n` +
+      `Order ID: <code>${orderId}</code>\n\n` +
+      `We apologize! We couldn't process your order.\n\n` +
+      `Possible reasons:\n` +
+      `• Product out of stock\n` +
+      `• Price mismatch\n` +
+      `• Availability issue\n\n` +
+      `📞 <b>Contact us for more details:</b>\n` +
+      `WhatsApp: ${WHATSAPP_CONTACT}\n` +
+      `Telegram: ${TELEGRAM_CONTACT}\n` +
+      `Phone: ${PHONE_NUMBER}\n\n` +
+      `🛍 Try browsing other products!`;
+
+    const customerButtons = Markup.inlineKeyboard([
+      [{ text: '📞 Contact Admin', url: TELEGRAM_CONTACT }],
+      [{ text: '🛍 Browse Products', callback_data: 'browse' }],
+    ]);
+
+    try {
+      await bot.telegram.sendMessage(customerId, customerText, { parse_mode: 'HTML', ...customerButtons });
+    } catch (err) {
+      console.error('Error sending customer message:', err.message);
+    }
+
+    const adminText = `❌ <b>ORDER REJECTED</b>\n\n` +
+      `Order ID: <code>${orderId}</code>\n` +
+      `Customer: ${order.customerName}\n` +
+      `Product: ${order.product.ProductName}\n\n` +
+      `Customer has been notified.`;
+
+    await ctx.editMessageText(adminText, { parse_mode: 'HTML' })
+      .catch(() => {});
   }
 
   if (data === 'request') {
@@ -248,7 +453,49 @@ bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
   const session = userSessions.get(userId);
 
-  if (session && session.stage === 'awaiting_request') {
+  if (session && session.stage === 'awaiting_search') {
+    const searchQuery = ctx.message.text;
+    const products = await getProducts();
+    const results = searchProducts(searchQuery, products);
+
+    if (results.length === 0) {
+      const text = `❌ <b>No products found for "${searchQuery}"</b>\n\n` +
+        `Try searching for:\n` +
+        `• Adobe\n` +
+        `• Office\n` +
+        `• WordPress\n` +
+        `• Android\n\n` +
+        `Or contact us for custom solutions!`;
+
+      const buttons = Markup.inlineKeyboard([
+        [{ text: '🔍 Search Again', callback_data: 'search' }],
+        [{ text: '🛍 Browse All Products', callback_data: 'browse' }],
+        [{ text: '❓ Request Custom Service', callback_data: 'request' }],
+      ]);
+
+      await ctx.reply(text, { parse_mode: 'HTML', ...buttons });
+    } else {
+      let text = `🔍 <b>SEARCH RESULTS for "${searchQuery}"</b>\n\n`;
+      let text2 = `Found <b>${results.length}</b> product(s)!\n\n`;
+      const buttons = [];
+
+      for (const product of results) {
+        const name = product.ProductName || 'Unnamed';
+        const price = product.YourPrice || '0';
+        text2 += `💾 ${name} - ₹${price}\n`;
+        buttons.push([{ text: `${name} - ₹${price}`, callback_data: `product_${product.ProductID}` }]);
+      }
+
+      buttons.push([{ text: '🔍 Search Again', callback_data: 'search' }]);
+      buttons.push([{ text: '↩️ Back to Menu', callback_data: 'back' }]);
+
+      await ctx.reply(text + text2, { parse_mode: 'HTML', ...Markup.inlineKeyboard(buttons) });
+    }
+
+    const sessionData = userSessions.get(userId) || {};
+    sessionData.stage = 'welcome';
+    userSessions.set(userId, sessionData);
+  } else if (session && session.stage === 'awaiting_request') {
     const userRequest = ctx.message.text;
     const userName = ctx.from.first_name || 'User';
 
